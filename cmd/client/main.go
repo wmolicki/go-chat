@@ -27,10 +27,12 @@ func connectToChatServer() (*websocket.Conn, error) {
 }
 
 func sendClientInfo(conn *websocket.Conn) error {
-	type clientInfo struct {
-		Name string
+	m := message.ClientInfoMessage{Name: ClientName}
+	encoded, err := m.Encode()
+	if err != nil {
+		log.Fatalf("could not encode client info message: %v", err)
 	}
-	err := conn.WriteJSON(clientInfo{Name: ClientName})
+	err = conn.WriteMessage(1, encoded)
 	if err != nil {
 		log.Fatalf("could not send message via conn: %v", err)
 	}
@@ -58,7 +60,8 @@ func main() {
 			if !ok {
 				log.Fatal("send channel closed - unhandled")
 			}
-			encoded, err := message.Encode(ClientName, string(msg))
+			m := message.NewChatMessage(ClientName, string(msg))
+			encoded, err := m.Encode()
 			if err != nil {
 				log.Fatalf("could not encode message: %v", err)
 			}
@@ -90,11 +93,16 @@ func main() {
 				log.Fatalf("message channel closed - this is not intended atm")
 			}
 			decoded, err := message.Decode(msg)
+			switch m := decoded.(type) {
+			case message.ChatMessage:
+				fmt.Printf("%s: %s\n"+Prompt, m.Username, m.Text)
+			default:
+				fmt.Printf("other message: %v\n", m)
+			}
 			if err != nil {
 				log.Printf("could not decode message: %v, skipping", err)
 				continue
 			}
-			fmt.Printf("%s: %s\n"+Prompt, decoded.Username, decoded.Text)
 		}
 	}()
 

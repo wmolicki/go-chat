@@ -35,7 +35,7 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	for {
-		mt, msg, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("client %d disconnecting: %v\n", clientId, err)
 			mu.Lock()
@@ -47,14 +47,16 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("skipping message - could not decode: %v\n", err)
 		}
-		log.Printf("got message from client %d: %s %s\n", clientId, decoded.Username, decoded.Text)
-
-		encoded, err := message.Encode(decoded.Username, decoded.Text)
-		if err != nil {
-			log.Fatalf("could not encode message: %v\n", err)
+		switch m := decoded.(type) {
+		case *message.ClientInfoMessage:
+			log.Printf("got client info message from client %d: %s\n", clientId, m.Name)
+		case *message.ChatMessage:
+			log.Printf("got chat message from client %d: %s %s\n", clientId, m.Username, m.Text)
+		default:
+			log.Printf("got some weird message from client: %v", m)
 		}
 
-		prepared, err := websocket.NewPreparedMessage(message.UserMessage, encoded)
+		prepared, err := websocket.NewPreparedMessage(1, msg)
 		if err != nil {
 			log.Fatalf("could not prepare message: %v", err)
 		}
@@ -80,12 +82,17 @@ func main() {
 		defer t.Stop()
 		for range t.C {
 			mu.Lock()
-			encoded, err := message.Encode("server", "clients: "+strconv.Itoa(len(clients)))
+			connectedClients := []string{}
+			for k := range clients {
+				connectedClients = append(connectedClients, strconv.Itoa(k))
+			}
+			m := message.ConnectedClientsMessage{Clients: connectedClients}
+			encoded, err := m.Encode()
 			if err != nil {
-				log.Fatalf("could not encode: %v ", err)
+				log.Fatalf("could not encode connected clients: %v ", err)
 			}
 
-			prepared, err := websocket.NewPreparedMessage(message.ConnectedClientsMsg, encoded)
+			prepared, err := websocket.NewPreparedMessage(1, encoded)
 			if err != nil {
 				log.Fatalf("error preparing message: %v\n", err)
 			}

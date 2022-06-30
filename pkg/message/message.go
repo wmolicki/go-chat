@@ -3,40 +3,100 @@ package message
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 )
 
 const (
-	UserMessage int = iota
-	ConnectedClientsMsg
-	ClientInfoMsg
+	ChatMessageType int = iota
+	ClientInfoMessageType
+	ConnectedClientsMessageType
 )
 
-type Envelope[T any] struct {
+type Message struct {
 	Type int
-	Msg  T
+	Body json.RawMessage
 }
 
-type Message struct {
+type ChatMessage struct {
 	Text     string `json:"text"`
 	Username string `json:"username"`
 }
 
-func Encode(username string, message string) ([]byte, error) {
-	m := make(map[string]string)
-	m["username"] = username
-	m["text"] = message
-	encoded, err := json.Marshal(m)
+type ClientInfoMessage struct {
+	Name string `json:"name"`
+}
+
+func (c ClientInfoMessage) Encode() ([]byte, error) {
+	bodyBytes, err := json.Marshal(c)
 	if err != nil {
 		return []byte{}, err
 	}
-	return encoded, nil
+	bodyJSONRaw := json.RawMessage(bodyBytes)
+	e := Message{Type: ClientInfoMessageType, Body: bodyJSONRaw}
+	messageBytes, err := json.Marshal(e)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return messageBytes, nil
 }
 
-func Decode(payload []byte) (map[string]string, error) {
-	m := make(map[string]string)
+type ConnectedClientsMessage struct {
+	Clients []string `json:"clients"`
+}
+
+func (c ConnectedClientsMessage) Encode() ([]byte, error) {
+	bodyBytes, err := json.Marshal(c)
+	if err != nil {
+		return []byte{}, err
+	}
+	bodyJSONRaw := json.RawMessage(bodyBytes)
+	e := Message{Type: ConnectedClientsMessageType, Body: bodyJSONRaw}
+	messageBytes, err := json.Marshal(e)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return messageBytes, nil
+}
+
+func NewChatMessage(username string, message string) ChatMessage {
+	return ChatMessage{Username: username, Text: message}
+}
+
+func (c ChatMessage) Encode() ([]byte, error) {
+	bodyBytes, err := json.Marshal(c)
+	if err != nil {
+		return []byte{}, err
+	}
+	bodyJSONRaw := json.RawMessage(bodyBytes)
+	e := Message{Type: ChatMessageType, Body: bodyJSONRaw}
+	messageBytes, err := json.Marshal(e)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return messageBytes, nil
+}
+
+func Decode(payload []byte) (interface{}, error) {
+	m := Message{}
 	err := json.Unmarshal(payload, &m)
 	if err != nil {
 		return m, fmt.Errorf("error unmarshaling payload: %v", err)
 	}
-	return m, nil
+	var dst interface{}
+	switch m.Type {
+	case ChatMessageType:
+		dst = &ChatMessage{}
+	case ClientInfoMessageType:
+		dst = &ClientInfoMessage{}
+	case ConnectedClientsMessageType:
+		dst = &ConnectedClientsMessage{}
+	}
+	err = json.Unmarshal(m.Body, dst)
+	if err != nil {
+		log.Fatalf("error unmarshaling Message.Body: %v", err)
+	}
+	return dst, nil
 }
