@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,30 +16,44 @@ const ClientsInfoPeriod = 5 * time.Second
 
 var upgrader = websocket.Upgrader{}
 
-var clients = map[int]*websocket.Conn{}
+var clients map[int]*client
 var mu = sync.Mutex{}
 
 var clientCount int
+
+type client struct {
+	clientId int
+	conn     *websocket.Conn
+	name     string
+}
+
+func (c client) String() string {
+	return fmt.Sprintf("%s (%d)", c.name, c.clientId)
+}
 
 func dummy(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatalf("could not upgrade conn to websocket: %v", err)
 	}
-	var clientId int
 	mu.Lock()
 	clientCount += 1
-	clientId = clientCount
-	clients[clientId] = conn
+
+	c := client{
+		clientId: clientCount,
+		conn:     conn,
+	}
+	clients[c.clientId] = &c
+
 	mu.Unlock()
-	defer conn.Close()
+	defer c.conn.Close()
 
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("client %d disconnecting: %v\n", clientId, err)
+			log.Printf("client %s disconnecting: %v\n", c, err)
 			mu.Lock()
-			delete(clients, clientId)
+			delete(clients, c.clientId)
 			defer mu.Unlock()
 			break
 		}
@@ -49,9 +63,10 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		}
 		switch m := decoded.(type) {
 		case *message.ClientInfoMessage:
-			log.Printf("got client info message from client %d: %s\n", clientId, m.Name)
+			c.name = m.Name
+			log.Printf("got client info message from client %s: %s\n", c, m.Name)
 		case *message.ChatMessage:
-			log.Printf("got chat message from client %d: %s %s\n", clientId, m.Username, m.Text)
+			log.Printf("got chat message from client %s: %s %s\n", c, m.Username, m.Text)
 		default:
 			log.Printf("got some weird message from client: %v", m)
 		}
@@ -62,10 +77,10 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		}
 		mu.Lock()
 		// this could be improved to send concurrently - but for now meh
-		for k, conn := range clients {
-			err = conn.WritePreparedMessage(prepared)
+		for _, cl := range clients {
+			err = cl.conn.WritePreparedMessage(prepared)
 			if err != nil {
-				log.Printf("error writing message to client %d: %v\n", k, err)
+				log.Printf("error writing message to client %s: %v\n", cl, err)
 				continue
 			}
 		}
@@ -74,7 +89,7 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	clients = make(map[int]*websocket.Conn)
+	clients = make(map[int]*client)
 
 	// send out information about the clients to every client
 	go func() {
@@ -83,8 +98,8 @@ func main() {
 		for range t.C {
 			mu.Lock()
 			connectedClients := []string{}
-			for k := range clients {
-				connectedClients = append(connectedClients, strconv.Itoa(k))
+			for _, c := range clients {
+				connectedClients = append(connectedClients, c.name)
 			}
 			m := message.ConnectedClientsMessage{Clients: connectedClients}
 			encoded, err := m.Encode()
@@ -97,10 +112,10 @@ func main() {
 				log.Fatalf("error preparing message: %v\n", err)
 			}
 
-			for k, conn := range clients {
-				err := conn.WritePreparedMessage(prepared)
+			for _, cl := range clients {
+				err := cl.conn.WritePreparedMessage(prepared)
 				if err != nil {
-					log.Printf("error writing message to client %d: %v\n", k, err)
+					log.Printf("error writing message to client %s: %v\n", cl, err)
 					continue
 				}
 			}
