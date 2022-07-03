@@ -44,9 +44,13 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		conn:     conn,
 	}
 	clients[c.clientId] = &c
-
 	mu.Unlock()
 	defer c.conn.Close()
+
+	// send connected clients message immediately on connect so client
+	// dont have to wait
+	tempMap := map[int]*client{c.clientId: &c}
+	sendConnectedClientsMessage(clients, tempMap)
 
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -88,6 +92,37 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func sendConnectedClientsMessage(clients map[int]*client, sendTo map[int]*client) {
+	mu.Lock()
+	connectedClients := []string{}
+	for _, c := range clients {
+		if c.name == "" {
+			continue
+		}
+		connectedClients = append(connectedClients, c.name)
+	}
+	m := message.ConnectedClientsMessage{Clients: connectedClients}
+	encoded, err := m.Encode()
+	if err != nil {
+		log.Fatalf("could not encode connected clients: %v ", err)
+	}
+
+	prepared, err := websocket.NewPreparedMessage(1, encoded)
+	if err != nil {
+		log.Fatalf("error preparing message: %v\n", err)
+	}
+
+	for _, cl := range sendTo {
+		err := cl.conn.WritePreparedMessage(prepared)
+		if err != nil {
+			log.Printf("error writing message to client %s: %v\n", cl, err)
+			continue
+		}
+	}
+	mu.Unlock()
+
+}
+
 func main() {
 	clients = make(map[int]*client)
 
@@ -96,30 +131,7 @@ func main() {
 		t := time.NewTicker(ClientsInfoPeriod)
 		defer t.Stop()
 		for range t.C {
-			mu.Lock()
-			connectedClients := []string{}
-			for _, c := range clients {
-				connectedClients = append(connectedClients, c.name)
-			}
-			m := message.ConnectedClientsMessage{Clients: connectedClients}
-			encoded, err := m.Encode()
-			if err != nil {
-				log.Fatalf("could not encode connected clients: %v ", err)
-			}
-
-			prepared, err := websocket.NewPreparedMessage(1, encoded)
-			if err != nil {
-				log.Fatalf("error preparing message: %v\n", err)
-			}
-
-			for _, cl := range clients {
-				err := cl.conn.WritePreparedMessage(prepared)
-				if err != nil {
-					log.Printf("error writing message to client %s: %v\n", cl, err)
-					continue
-				}
-			}
-			mu.Unlock()
+			sendConnectedClientsMessage(clients, clients)
 		}
 	}()
 

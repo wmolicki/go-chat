@@ -18,8 +18,9 @@ type Message struct {
 }
 
 type ChatMessage struct {
-	Text     string `json:"text"`
-	Username string `json:"username"`
+	Text      string `json:"text"`
+	Username  string `json:"username"`
+	Recepient string `json:"recepient"`
 }
 
 type ClientInfoMessage struct {
@@ -60,8 +61,8 @@ func (c ConnectedClientsMessage) Encode() ([]byte, error) {
 	return messageBytes, nil
 }
 
-func NewChatMessage(username string, message string) ChatMessage {
-	return ChatMessage{Username: username, Text: message}
+func NewChatMessage(username string, message string, recepient string) ChatMessage {
+	return ChatMessage{Username: username, Text: message, Recepient: recepient}
 }
 
 func (c ChatMessage) Encode() ([]byte, error) {

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/url"
+	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -13,16 +16,18 @@ import (
 	"github.com/wmolicki/go-chat/pkg/message"
 )
 
-const ClientName = "wojtek"
 const ServerURL = "localhost:8081"
 
 var app *tview.Application
+var ClientName string
+var CurrentRecepient string
 
 var connectedClients []string
 
 type ChatEntry struct {
-	Text string
-	Time time.Time
+	Username string
+	Text     string
+	Time     time.Time
 }
 
 func (e *ChatEntry) Format(username string) string {
@@ -53,6 +58,13 @@ func sendClientInfo(conn *websocket.Conn) error {
 }
 
 func main() {
+	clientNamePtr := flag.String("username", "", "chat username")
+	flag.Parse()
+	ClientName = *clientNamePtr
+	if ClientName == "" {
+		log.Fatal("username must be set")
+	}
+
 	conn, err := connectToChatServer()
 	if err != nil {
 		log.Fatalf("error connecting to chat server: %v", err)
@@ -66,7 +78,7 @@ func main() {
 	recvCh := make(chan []byte, 10)
 	sendCh := make(chan []byte, 10)
 
-	// var mu sync.Mutex
+	var mu sync.Mutex
 
 	connectedClients = []string{}
 	chatHistory := make(map[string][]ChatEntry)
@@ -78,7 +90,7 @@ func main() {
 			if !ok {
 				log.Fatal("send channel closed - unhandled")
 			}
-			m := message.NewChatMessage(ClientName, string(msg))
+			m := message.NewChatMessage(ClientName, string(msg), "aaa")
 			encoded, err := m.Encode()
 			if err != nil {
 				log.Fatalf("could not encode message: %v", err)
@@ -151,14 +163,15 @@ func main() {
 	connected.SetSelectedTextColor(tcell.ColorDarkGreen)
 	connected.SetHighlightFullLine(true)
 	connected.SetChangedFunc(func(i int, username string, lel string, s rune) {
+		CurrentRecepient = username
 		chat.SetTitle(fmt.Sprintf("Chatting with %s", username))
 		chat.Clear()
-		entries, ok := chatHistory[username]
+		entries, ok := chatHistory[CurrentRecepient]
 		if !ok {
 			return
 		}
 		for _, e := range entries {
-			chat.AddItem(e.Format(username), "", 0, func() {})
+			chat.AddItem(e.Format(CurrentRecepient), "", 0, func() {})
 		}
 
 	})
@@ -213,18 +226,30 @@ func main() {
 			switch m := decoded.(type) {
 			case *message.ChatMessage:
 				app.QueueUpdateDraw(func() {
-					e := ChatEntry{Text: m.Text, Time: time.Now()}
-					chatHistory[m.Username] = append(chatHistory[m.Username], e)
+					e := ChatEntry{Text: m.Text, Time: time.Now(), Username: m.Username}
+					chatHistory[CurrentRecepient] = append(chatHistory[m.Username], e)
 					chat.AddItem(e.Format(m.Username), "", 0, func() {})
 				})
 			case *message.ConnectedClientsMessage:
 				app.QueueUpdateDraw(func() {
-					connected.Clear()
+					mu.Lock()
+					defer mu.Unlock()
 					sort.Slice(m.Clients, func(i, j int) bool {
 						return m.Clients[i] < m.Clients[j]
 					})
+					if reflect.DeepEqual(m.Clients, connectedClients) {
+						return
+					}
+					connected.Clear()
+					connectedClients = connectedClients[:0]
 					for _, c := range m.Clients {
-						connected.AddItem(c, "", 0, nil)
+						if c != ClientName {
+							connected.AddItem(c, "", 0, nil)
+						}
+						connectedClients = append(connectedClients, c)
+						sort.Slice(connectedClients, func(i, j int) bool {
+							return connectedClients[i] < connectedClients[j]
+						})
 					}
 				})
 			}
