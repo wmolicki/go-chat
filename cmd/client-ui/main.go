@@ -19,83 +19,114 @@ import (
 const ServerURL = "localhost:8081"
 
 var app *tview.Application
-var ClientName string
-var CurrentRecepient string
 
-var connectedClients []string
+type User struct {
+	Name string
 
-type ChatEntry struct {
-	Username string
-	Text     string
-	Time     time.Time
+	chatHistoryMu sync.Mutex
+	chatHistory   map[string][]ChatEntry
 }
 
-func (e *ChatEntry) Format(username string) string {
-	return fmt.Sprintf("%s %s %s", e.Time.Format("15:04"), username, e.Text)
+func (u *User) GetHistoryFor(username string) []ChatEntry {
+	u.chatHistoryMu.Lock()
+	defer u.chatHistoryMu.Unlock()
+
+	entries, ok := u.chatHistory[username]
+	if !ok {
+		return []ChatEntry{}
+	}
+	return entries
 }
 
-func connectToChatServer() (*websocket.Conn, error) {
-	u := url.URL{Scheme: "ws", Host: ServerURL, Path: "/"}
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("could not dial to ws server: %v", err)
+func (u *User) AppendHistory(sender string, recipient string, message string) ChatEntry {
+	e := ChatEntry{Sender: sender, Recipient: recipient, Time: time.Now()}
+	u.chatHistoryMu.Lock()
+	defer u.chatHistoryMu.Unlock()
+	var target string
+	if sender == u.Name {
+		target = recipient
+	} else {
+		target = sender
 	}
-
-	return conn, nil
+	u.chatHistory[target] = append(u.chatHistory[target], e)
+	return e
 }
 
-func sendClientInfo(conn *websocket.Conn) error {
-	m := message.ClientInfoMessage{Name: ClientName}
-	encoded, err := m.Encode()
-	if err != nil {
-		log.Fatalf("could not encode client info message: %v", err)
-	}
-	err = conn.WriteMessage(1, encoded)
-	if err != nil {
-		log.Fatalf("could not send message via conn: %v", err)
-	}
-	return nil
+func NewUser(name string) *User {
+	u := User{Name: name, chatHistory: make(map[string][]ChatEntry)}
+	return &u
 }
 
-func main() {
-	clientNamePtr := flag.String("username", "", "chat username")
-	flag.Parse()
-	ClientName = *clientNamePtr
-	if ClientName == "" {
-		log.Fatal("username must be set")
-	}
+type Chat struct {
+	ConnectedUsers []string
 
-	conn, err := connectToChatServer()
+	currentRecipientMu sync.Mutex
+	currentRecipient   string
+
+	conn *websocket.Conn
+
+	recvCh chan []byte
+	sendCh chan []byte
+
+	connectedClientsMu sync.Mutex
+	connectedClients   []string
+}
+
+func (c *Chat) Send(message string) {
+	c.sendCh <- []byte(message)
+}
+
+func (c *Chat) Recv() ([]byte, bool) {
+	msg, ok := <-c.recvCh
+	return msg, ok
+}
+
+func NewChat() *Chat {
+	c := Chat{}
+	c.recvCh = make(chan []byte, 10)
+	c.sendCh = make(chan []byte, 10)
+	return &c
+}
+
+func (c *Chat) GetConnectedClients() []string {
+	c.connectedClientsMu.Lock()
+	defer c.connectedClientsMu.Unlock()
+	return c.connectedClients
+}
+
+func (c *Chat) SetConnectedClients(clients []string) {
+	c.connectedClientsMu.Lock()
+	defer c.connectedClientsMu.Unlock()
+	c.connectedClients = c.connectedClients[:0]
+	c.connectedClients = append(c.connectedClients, clients...)
+	// sort.Slice(c.connectedClients, func(i, j int) bool {
+	// 	return c.connectedClients[i] < c.connectedClients[j]
+	// })
+}
+
+func (c *Chat) Start(user *User) error {
+	err := c.connectToChatServer()
 	if err != nil {
-		log.Fatalf("error connecting to chat server: %v", err)
+		return fmt.Errorf("error connecting to chat server: %v", err)
 	}
-	defer conn.Close()
-	err = sendClientInfo(conn)
+	err = c.sendClientInfo(user)
 	if err != nil {
-		log.Fatalf("error sending client info: %v", err)
+		return fmt.Errorf("error sending client info: %v", err)
 	}
-
-	recvCh := make(chan []byte, 10)
-	sendCh := make(chan []byte, 10)
-
-	var mu sync.Mutex
-
-	connectedClients = []string{}
-	chatHistory := make(map[string][]ChatEntry)
 
 	// sending to server
 	go func() {
 		for {
-			msg, ok := <-sendCh
+			msg, ok := <-c.sendCh
 			if !ok {
 				log.Fatal("send channel closed - unhandled")
 			}
-			m := message.NewChatMessage(ClientName, string(msg), "aaa")
+			m := message.NewChatMessage(user.Name, string(msg), c.GetCurrentRecipient())
 			encoded, err := m.Encode()
 			if err != nil {
 				log.Fatalf("could not encode message: %v", err)
 			}
-			err = conn.WriteMessage(1, encoded)
+			err = c.conn.WriteMessage(1, encoded)
 			if err != nil {
 				log.Fatalf("could not send message via conn: %v", err)
 			}
@@ -105,16 +136,101 @@ func main() {
 	// receives messages from the server
 	go func() {
 		for {
-			_, message, err := conn.ReadMessage()
+			_, message, err := c.conn.ReadMessage()
 			if err != nil {
 				log.Printf("error reading message from conn: %v", err)
-				close(recvCh)
+				close(c.recvCh)
 				return
 			}
-			recvCh <- message
+			c.recvCh <- message
 		}
 	}()
 
+	return nil
+}
+
+func (c *Chat) connectToChatServer() error {
+	u := url.URL{Scheme: "ws", Host: ServerURL, Path: "/"}
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("could not dial to ws server: %v", err)
+	}
+	c.conn = conn
+	return nil
+}
+
+func (c *Chat) sendClientInfo(user *User) error {
+	m := message.ClientInfoMessage{Name: user.Name}
+	encoded, err := m.Encode()
+	if err != nil {
+		log.Fatalf("could not encode client info message: %v", err)
+	}
+	err = c.conn.WriteMessage(1, encoded)
+	if err != nil {
+		log.Fatalf("could not send message via conn: %v", err)
+	}
+	return nil
+}
+
+func (c *Chat) Close() error {
+	return c.conn.Close()
+}
+
+func (c *Chat) SetCurrentRecipient(name string) {
+	c.currentRecipientMu.Lock()
+	defer c.currentRecipientMu.Unlock()
+	c.currentRecipient = name
+}
+
+func (c *Chat) GetCurrentRecipient() string {
+	c.currentRecipientMu.Lock()
+	defer c.currentRecipientMu.Unlock()
+	return c.currentRecipient
+}
+
+type ChatEntry struct {
+	Sender    string
+	Recipient string
+	Text      string
+	Time      time.Time
+}
+
+func (e *ChatEntry) Format() string {
+	return fmt.Sprintf("%s %s %s", e.Time.Format("15:04"), e.Sender, e.Text)
+}
+
+type Config struct {
+	UserName string
+}
+
+func parseFlags() Config {
+	userNamePtr := flag.String("username", "", "chat username")
+	flag.Parse()
+	if *userNamePtr == "" {
+		return Config{UserName: "debug"}
+		// log.Fatal("username must be set")
+	}
+
+	c := Config{UserName: *userNamePtr}
+
+	return c
+}
+
+type TUI struct {
+	app       *tview.Application
+	connected *tview.List
+	history   *tview.List
+	input     *tview.InputField
+
+	flex *tview.Flex
+}
+
+func (t *TUI) Run() error {
+	err := t.app.SetRoot(t.flex, true).SetFocus(t.connected).Run()
+	return err
+}
+
+func NewTUI() *TUI {
 	app = tview.NewApplication()
 
 	connected := tview.NewList()
@@ -127,31 +243,20 @@ func main() {
 	connected.SetBlurFunc(func() {
 		connected.SetBorderColor(tcell.ColorWhite)
 	})
+	connected.SetSelectedTextColor(tcell.ColorDarkGreen)
+	connected.SetHighlightFullLine(true)
 
 	chat := tview.NewList()
 	chat.SetBorder(true).SetTitle("Chatting with <name>")
 
 	input := tview.NewInputField()
-	input.SetText("aaa")
 	input.SetBorder(true).SetTitle("Message [CTRL+M]")
 	input.SetFieldStyle(tcell.StyleDefault.Background(tview.Styles.PrimitiveBackgroundColor))
-
 	input.SetFocusFunc(func() {
 		input.SetBorderColor(tcell.ColorDarkGreen)
 	})
 	input.SetBlurFunc(func() {
 		input.SetBorderColor(tcell.ColorWhite)
-	})
-
-	input.SetDoneFunc(func(key tcell.Key) {
-		switch key {
-		case tcell.KeyEnter:
-			if input.GetText() == "" {
-				break
-			}
-			sendCh <- []byte(input.GetText())
-			input.SetText("")
-		}
 	})
 
 	flex := tview.NewFlex().
@@ -160,55 +265,83 @@ func main() {
 			AddItem(chat, 0, 1, false).
 			AddItem(input, 3, 1, false), 0, 4, false)
 
-	connected.SetSelectedTextColor(tcell.ColorDarkGreen)
-	connected.SetHighlightFullLine(true)
-	connected.SetChangedFunc(func(i int, username string, lel string, s rune) {
-		CurrentRecepient = username
-		chat.SetTitle(fmt.Sprintf("Chatting with %s", username))
-		chat.Clear()
-		entries, ok := chatHistory[CurrentRecepient]
-		if !ok {
-			return
+	return &TUI{
+		app:       app,
+		connected: connected,
+		history:   chat,
+		input:     input,
+		flex:      flex,
+	}
+}
+
+func main() {
+	config := parseFlags()
+
+	user := NewUser(config.UserName)
+	chat := NewChat()
+	err := chat.Start(user)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer chat.Close()
+
+	tui := NewTUI()
+
+	tui.input.SetDoneFunc(func(key tcell.Key) {
+		switch key {
+		case tcell.KeyEnter:
+			if tui.input.GetText() == "" {
+				break
+			}
+			chat.Send(tui.input.GetText())
+			tui.input.SetText("")
 		}
+	})
+
+	tui.connected.SetChangedFunc(func(i int, username string, lel string, s rune) {
+		chat.SetCurrentRecipient(username)
+		tui.history.SetTitle(fmt.Sprintf("(%s) Chatting with %s", user.Name, username))
+		tui.history.Clear()
+		entries := user.GetHistoryFor(username)
 		for _, e := range entries {
-			chat.AddItem(e.Format(CurrentRecepient), "", 0, func() {})
+			tui.history.AddItem(e.Format(), "", 0, func() {})
 		}
 
 	})
-	connected.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
+	tui.connected.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
 		switch e.Key() {
 		case tcell.KeyEnter:
-			if connected.HasFocus() {
-				app.SetFocus(input)
+			if tui.connected.HasFocus() {
+				tui.app.SetFocus(tui.input)
 				return nil
 			}
 		}
 		return e
 	})
 
-	app.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
+	tui.app.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
 		switch e.Key() {
 		case tcell.KeyEsc:
-			app.Stop()
+			tui.app.Stop()
 			return nil
 		case tcell.KeyCtrlU:
-			go app.QueueUpdateDraw(func() {
-				app.SetFocus(connected)
+			go tui.app.QueueUpdateDraw(func() {
+				tui.app.SetFocus(tui.connected)
 			})
 		case tcell.KeyCtrlM:
-			go app.QueueUpdateDraw(func() {
-				app.SetFocus(input)
+			go tui.app.QueueUpdateDraw(func() {
+				tui.app.SetFocus(tui.input)
 			})
 		case tcell.KeyRune:
 			switch e.Rune() {
 			case 'j':
-				if connected.HasFocus() {
-					connected.SetCurrentItem((connected.GetCurrentItem() + 1) % connected.GetItemCount())
+				if tui.connected.HasFocus() {
+					tui.connected.SetCurrentItem((tui.connected.GetCurrentItem() + 1) % tui.connected.GetItemCount())
 				}
 			case 'k':
 
-				if connected.HasFocus() {
-					connected.SetCurrentItem((connected.GetCurrentItem() - 1) % connected.GetItemCount())
+				if tui.connected.HasFocus() {
+					tui.connected.SetCurrentItem((tui.connected.GetCurrentItem() - 1) % tui.connected.GetItemCount())
 				}
 			}
 		}
@@ -218,38 +351,31 @@ func main() {
 	// decodes and prints messages from the receive queue
 	go func() {
 		for {
-			msg, ok := <-recvCh
+			msg, ok := chat.Recv()
 			if !ok {
 				log.Fatalf("message channel closed - this is not intended atm")
 			}
 			decoded, err := message.Decode(msg)
 			switch m := decoded.(type) {
 			case *message.ChatMessage:
-				app.QueueUpdateDraw(func() {
-					e := ChatEntry{Text: m.Text, Time: time.Now(), Username: m.Username}
-					chatHistory[CurrentRecepient] = append(chatHistory[m.Username], e)
-					chat.AddItem(e.Format(m.Username), "", 0, func() {})
+				tui.app.QueueUpdateDraw(func() {
+					e := user.AppendHistory(m.Sender, m.Recipient, m.Text)
+					tui.history.AddItem(e.Format(), "", 0, func() {})
 				})
 			case *message.ConnectedClientsMessage:
 				app.QueueUpdateDraw(func() {
-					mu.Lock()
-					defer mu.Unlock()
 					sort.Slice(m.Clients, func(i, j int) bool {
 						return m.Clients[i] < m.Clients[j]
 					})
-					if reflect.DeepEqual(m.Clients, connectedClients) {
+					if reflect.DeepEqual(m.Clients, chat.GetConnectedClients()) {
 						return
 					}
-					connected.Clear()
-					connectedClients = connectedClients[:0]
+					tui.connected.Clear()
+					chat.SetConnectedClients(m.Clients)
 					for _, c := range m.Clients {
-						if c != ClientName {
-							connected.AddItem(c, "", 0, nil)
+						if c != user.Name {
+							tui.connected.AddItem(c, "", 0, nil)
 						}
-						connectedClients = append(connectedClients, c)
-						sort.Slice(connectedClients, func(i, j int) bool {
-							return connectedClients[i] < connectedClients[j]
-						})
 					}
 				})
 			}
@@ -260,7 +386,7 @@ func main() {
 		}
 	}()
 
-	if err := app.SetRoot(flex, true).SetFocus(connected).Run(); err != nil {
+	if err := tui.Run(); err != nil {
 		panic(err)
 	}
 }

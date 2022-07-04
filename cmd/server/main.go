@@ -28,7 +28,16 @@ type client struct {
 }
 
 func (c client) String() string {
-	return fmt.Sprintf("%s (%d)", c.name, c.clientId)
+	return fmt.Sprintf("Client[%s (%d)]", c.name, c.clientId)
+}
+
+func getClientByName(name string, clients map[int]*client) (*client, error) {
+	for _, c := range clients {
+		if c.name == name {
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("no such client: %s", name)
 }
 
 func dummy(w http.ResponseWriter, r *http.Request) {
@@ -52,13 +61,15 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 	tempMap := map[int]*client{c.clientId: &c}
 	sendConnectedClientsMessage(clients, tempMap)
 
+	var recipient *client
+
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("client %s disconnecting: %v\n", c, err)
 			mu.Lock()
 			delete(clients, c.clientId)
-			defer mu.Unlock()
+			mu.Unlock()
 			break
 		}
 		decoded, err := message.Decode(msg)
@@ -68,9 +79,23 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		switch m := decoded.(type) {
 		case *message.ClientInfoMessage:
 			c.name = m.Name
+			mu.Lock()
+			recipient, err = getClientByName(m.Name, clients)
+			mu.Unlock()
+			if err != nil {
+				log.Println("could not get client by name")
+				continue
+			}
 			log.Printf("got client info message from client %s: %s\n", c, m.Name)
 		case *message.ChatMessage:
-			log.Printf("got chat message from client %s: %s %s\n", c, m.Username, m.Text)
+			mu.Lock()
+			recipient, err = getClientByName(m.Recipient, clients)
+			mu.Unlock()
+			if err != nil {
+				log.Printf("client %s already disconnected", m.Recipient)
+				break
+			}
+			log.Printf("got chat message %+v from %s to %s: %s\n", m, m.Sender, m.Recipient, m.Text)
 		default:
 			log.Printf("got some weird message from client: %v", m)
 		}
@@ -79,21 +104,18 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Fatalf("could not prepare message: %v", err)
 		}
-		mu.Lock()
-		// this could be improved to send concurrently - but for now meh
-		for _, cl := range clients {
-			err = cl.conn.WritePreparedMessage(prepared)
-			if err != nil {
-				log.Printf("error writing message to client %s: %v\n", cl, err)
-				continue
-			}
+
+		err = recipient.conn.WritePreparedMessage(prepared)
+		if err != nil {
+			log.Printf("error writing message to client %d: %v\n", recipient.clientId, err)
+			continue
 		}
-		mu.Unlock()
 	}
 }
 
 func sendConnectedClientsMessage(clients map[int]*client, sendTo map[int]*client) {
 	mu.Lock()
+	defer mu.Unlock()
 	connectedClients := []string{}
 	for _, c := range clients {
 		if c.name == "" {
@@ -119,8 +141,6 @@ func sendConnectedClientsMessage(clients map[int]*client, sendTo map[int]*client
 			continue
 		}
 	}
-	mu.Unlock()
-
 }
 
 func main() {
