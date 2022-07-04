@@ -18,8 +18,6 @@ import (
 
 const ServerURL = "localhost:8081"
 
-var app *tview.Application
-
 type User struct {
 	Name string
 
@@ -44,8 +42,10 @@ func (u *User) AppendHistory(sender string, recipient string, message string) Ch
 	defer u.chatHistoryMu.Unlock()
 	var target string
 	if sender == u.Name {
+		// messages sent by me are saved in chat history with recepient
 		target = recipient
 	} else {
+		// messages sent to me are saved in chat history of the sender
 		target = sender
 	}
 	u.chatHistory[target] = append(u.chatHistory[target], e)
@@ -231,7 +231,7 @@ func (t *TUI) Run() error {
 }
 
 func NewTUI() *TUI {
-	app = tview.NewApplication()
+	app := tview.NewApplication()
 
 	connected := tview.NewList()
 	connected.SetBorder(true).SetTitle("Connected [CTRL+U]")
@@ -363,7 +363,7 @@ func main() {
 					tui.history.AddItem(e.Format(), "", 0, func() {})
 				})
 			case *message.ConnectedClientsMessage:
-				app.QueueUpdateDraw(func() {
+				tui.app.QueueUpdateDraw(func() {
 					sort.Slice(m.Clients, func(i, j int) bool {
 						return m.Clients[i] < m.Clients[j]
 					})
