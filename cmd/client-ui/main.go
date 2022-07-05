@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"reflect"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -22,22 +22,23 @@ type User struct {
 	Name string
 
 	chatHistoryMu sync.Mutex
-	chatHistory   map[string][]ChatEntry
+	chatHistory   map[string][]*ChatEntry
 }
 
-func (u *User) GetHistoryFor(username string) []ChatEntry {
+func (u *User) GetHistoryFor(username string) []*ChatEntry {
 	u.chatHistoryMu.Lock()
 	defer u.chatHistoryMu.Unlock()
 
 	entries, ok := u.chatHistory[username]
 	if !ok {
-		return []ChatEntry{}
+		log.Printf("no history for %s\n", username)
+		return []*ChatEntry{}
 	}
 	return entries
 }
 
 func (u *User) AppendHistory(sender string, recipient string, message string) ChatEntry {
-	e := ChatEntry{Sender: sender, Recipient: recipient, Time: time.Now()}
+	e := ChatEntry{Sender: sender, Recipient: recipient, Time: time.Now(), Text: message}
 	u.chatHistoryMu.Lock()
 	defer u.chatHistoryMu.Unlock()
 	var target string
@@ -48,12 +49,13 @@ func (u *User) AppendHistory(sender string, recipient string, message string) Ch
 		// messages sent to me are saved in chat history of the sender
 		target = sender
 	}
-	u.chatHistory[target] = append(u.chatHistory[target], e)
+	log.Printf("saving message sent by %s to %s to %s[%s] = %s\n", sender, recipient, u.Name, target, message)
+	u.chatHistory[target] = append(u.chatHistory[target], &e)
 	return e
 }
 
 func NewUser(name string) *User {
-	u := User{Name: name, chatHistory: make(map[string][]ChatEntry)}
+	u := User{Name: name, chatHistory: make(map[string][]*ChatEntry)}
 	return &u
 }
 
@@ -69,7 +71,7 @@ type Chat struct {
 	sendCh chan []byte
 
 	connectedClientsMu sync.Mutex
-	connectedClients   []string
+	connectedClients   map[string]struct{}
 }
 
 func (c *Chat) Send(message string) {
@@ -85,10 +87,11 @@ func NewChat() *Chat {
 	c := Chat{}
 	c.recvCh = make(chan []byte, 10)
 	c.sendCh = make(chan []byte, 10)
+	c.connectedClients = make(map[string]struct{})
 	return &c
 }
 
-func (c *Chat) GetConnectedClients() []string {
+func (c *Chat) GetConnectedClients() map[string]struct{} {
 	c.connectedClientsMu.Lock()
 	defer c.connectedClientsMu.Unlock()
 	return c.connectedClients
@@ -97,11 +100,12 @@ func (c *Chat) GetConnectedClients() []string {
 func (c *Chat) SetConnectedClients(clients []string) {
 	c.connectedClientsMu.Lock()
 	defer c.connectedClientsMu.Unlock()
-	c.connectedClients = c.connectedClients[:0]
-	c.connectedClients = append(c.connectedClients, clients...)
-	// sort.Slice(c.connectedClients, func(i, j int) bool {
-	// 	return c.connectedClients[i] < c.connectedClients[j]
-	// })
+	for k := range c.connectedClients {
+		delete(c.connectedClients, k)
+	}
+	for _, cli := range clients {
+		c.connectedClients[cli] = struct{}{}
+	}
 }
 
 func (c *Chat) Start(user *User) error {
@@ -278,8 +282,14 @@ func main() {
 	config := parseFlags()
 
 	user := NewUser(config.UserName)
+	logFile, err := os.OpenFile(fmt.Sprintf("%s_chat.log", user.Name), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal("could not open log file")
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
 	chat := NewChat()
-	err := chat.Start(user)
+	err = chat.Start(user)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -339,7 +349,6 @@ func main() {
 					tui.connected.SetCurrentItem((tui.connected.GetCurrentItem() + 1) % tui.connected.GetItemCount())
 				}
 			case 'k':
-
 				if tui.connected.HasFocus() {
 					tui.connected.SetCurrentItem((tui.connected.GetCurrentItem() - 1) % tui.connected.GetItemCount())
 				}
@@ -367,16 +376,23 @@ func main() {
 					sort.Slice(m.Clients, func(i, j int) bool {
 						return m.Clients[i] < m.Clients[j]
 					})
-					if reflect.DeepEqual(m.Clients, chat.GetConnectedClients()) {
-						return
-					}
-					tui.connected.Clear()
-					chat.SetConnectedClients(m.Clients)
+					currentlyConnected := chat.GetConnectedClients()
+					serverConnected := make(map[string]struct{})
 					for _, c := range m.Clients {
-						if c != user.Name {
+						if _, ok := currentlyConnected[c]; !ok {
+							// not in currently connected, need to add
 							tui.connected.AddItem(c, "", 0, nil)
 						}
+						serverConnected[c] = struct{}{}
 					}
+					for c := range currentlyConnected {
+						if _, ok := serverConnected[c]; !ok {
+							// not in server connected, need to delete
+							items := tui.connected.FindItems(c, "", false, false)
+							tui.connected.RemoveItem(items[0])
+						}
+					}
+					chat.SetConnectedClients(m.Clients)
 				})
 			}
 			if err != nil {
@@ -386,6 +402,7 @@ func main() {
 		}
 	}()
 
+	log.Println("starting..")
 	if err := tui.Run(); err != nil {
 		panic(err)
 	}
