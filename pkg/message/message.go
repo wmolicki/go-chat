@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -18,9 +20,9 @@ type Message struct {
 }
 
 type ChatMessage struct {
-	Text      string `json:"text"`
-	Sender    string `json:"username"`
-	Recipient string `json:"recipient"`
+	Text        string    `json:"text"`
+	SenderId    uuid.UUID `json:"sender_id"`
+	RecipientId uuid.UUID `json:"recipient_id"`
 }
 
 type ClientInfoMessage struct {
@@ -42,8 +44,13 @@ func (c ClientInfoMessage) Encode() ([]byte, error) {
 	return messageBytes, nil
 }
 
+type ConnectedClient struct {
+	Name string    `json:"name"`
+	Id   uuid.UUID `json:"id"`
+}
+
 type ConnectedClientsMessage struct {
-	Clients []string `json:"clients"`
+	Clients []ConnectedClient `json:"clients"`
 }
 
 func (c ConnectedClientsMessage) Encode() ([]byte, error) {
@@ -59,10 +66,6 @@ func (c ConnectedClientsMessage) Encode() ([]byte, error) {
 	}
 
 	return messageBytes, nil
-}
-
-func NewChatMessage(sender string, message string, recipient string) ChatMessage {
-	return ChatMessage{Sender: sender, Text: message, Recipient: recipient}
 }
 
 func (c ChatMessage) Encode() ([]byte, error) {
