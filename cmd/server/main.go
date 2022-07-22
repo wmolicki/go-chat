@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/wmolicki/go-chat/pkg/message"
+	"google.golang.org/protobuf/proto"
 )
 
 const ListenAddr = "localhost:8081"
@@ -77,24 +78,33 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 			mu.Unlock()
 			break
 		}
-		decoded, err := message.Decode(msg)
-		if err != nil {
-			log.Printf("skipping message - could not decode: %v\n", err)
+		// decoded, err := message.Decode(msg)
+		// if err != nil {
+		// 	log.Printf("skipping message - could not decode: %v\n", err)
+		// }
+
+		dest := &message.Message{}
+		if err := proto.Unmarshal(msg, dest); err != nil {
+			panic(err)
 		}
-		switch m := decoded.(type) {
-		case *message.ClientInfoMessage:
-			log.Printf("got client info message from client %s: %s\n", c.clientId, m.Name)
-			c.name = m.Name
-		case *message.ChatMessage:
+
+		switch m := dest.Body.(type) {
+		case *message.Message_ClientInfoMessage:
+			log.Printf("got client info message from client %s: %s\n", c.clientId, m.ClientInfoMessage.Name)
+			c.name = m.ClientInfoMessage.Name
+		case *message.Message_ChatMessage:
+			recipientId, err := uuid.FromBytes([]byte(m.ChatMessage.RecipientId))
+			senderId, err := uuid.FromBytes([]byte(m.ChatMessage.SenderId))
+
 			mu.Lock()
-			recipient, err = getClientById(m.RecipientId, clients)
-			sender, err := getClientById(m.SenderId, clients)
+			recipient, err = getClientById(recipientId, clients)
+			sender, err := getClientById(senderId, clients)
 			mu.Unlock()
 			if err != nil {
-				log.Printf("client %s already disconnected: %v", m.RecipientId, err)
+				log.Printf("client %s already disconnected: %v", recipientId, err)
 				break
 			}
-			log.Printf("got chat message %+v from %s to %s\n", m, m.SenderId, m.RecipientId)
+			log.Printf("got chat message %+v from %s to %s\n", m, senderId, recipientId)
 
 			prepared, err := websocket.NewPreparedMessage(1, msg)
 			if err != nil {
@@ -121,12 +131,14 @@ func dummy(w http.ResponseWriter, r *http.Request) {
 func sendConnectedClientsMessage(clients map[uuid.UUID]*client, sendTo map[uuid.UUID]*client) {
 	mu.Lock()
 	defer mu.Unlock()
-	connectedClients := []message.ConnectedClient{}
+	connectedClients := &message.ConnectedClientsMessage{}
+
+	ccs := []*message.ConnectedClientsMessage_ConnectedClient{}
 	for id, c := range clients {
 		if c.name == "" {
 			continue
 		}
-		connectedClients = append(connectedClients, message.ConnectedClient{Name: c.name, Id: id})
+		ccs = append(ccs, &message.ConnectedClientsMessage_ConnectedClient{Name: c.name, Id: id.String()})
 	}
 	m := message.ConnectedClientsMessage{Clients: connectedClients}
 	encoded, err := m.Encode()
