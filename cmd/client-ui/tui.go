@@ -56,6 +56,8 @@ func NewTUI() *TUI {
 
 	chat := tview.NewList()
 	chat.SetBorder(true).SetTitle("Chatting with <name>")
+	chat.SetSelectedBackgroundColor(tview.Styles.PrimitiveBackgroundColor)
+	chat.SetSelectedTextColor(tview.Styles.PrimaryTextColor)
 
 	input := tview.NewInputField()
 	input.SetBorder(true).SetTitle("Message [CTRL+M]")
