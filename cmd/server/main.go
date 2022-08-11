@@ -1,32 +1,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
-	"github.com/wmolicki/go-chat/pkg/message"
-	"google.golang.org/protobuf/proto"
+	pb "github.com/wmolicki/go-chat/pkg/message/proto"
+	"google.golang.org/grpc"
 )
 
 const ListenAddr = "localhost:8081"
-const ClientsInfoPeriod = 5 * time.Second
-
-var upgrader = websocket.Upgrader{}
-
-var clients map[uuid.UUID]*client
-var mu = sync.Mutex{}
-
-var clientCount int
 
 type client struct {
-	clientId uuid.UUID
-	conn     *websocket.Conn
-	name     string
+	clientId  uuid.UUID
+	name      string
+	messageCh chan chatMessage
 }
 
 func (c client) String() string {
@@ -42,137 +33,102 @@ func getClientById(id uuid.UUID, clients map[uuid.UUID]*client) (*client, error)
 	return nil, fmt.Errorf("no such client: %s", id)
 }
 
-func dummy(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Fatalf("could not upgrade conn to websocket: %v", err)
-	}
-	mu.Lock()
-	clientCount += 1
+type chatMessage struct {
+	recipient string
+	sender    string
+	text      string
+}
+
+type server struct {
+	pb.UnimplementedChatServerServer
+	clientCount   int32
+	clientCountMu sync.Mutex
+
+	clients   map[uuid.UUID]*client
+	clientsMu sync.Mutex
+}
+
+func (s *server) Connect(ctx context.Context, in *pb.ConnectRequest) (*pb.ConnectResponse, error) {
+	s.clientCountMu.Lock()
+	defer s.clientCountMu.Unlock()
+	s.clientCount += 1
 
 	id, err := uuid.NewRandom()
 	if err != nil {
 		log.Fatalf("could not generate uuid: %v\n", err)
 	}
 	c := client{
-		clientId: id,
-		conn:     conn,
+		clientId:  id,
+		name:      in.GetName(),
+		messageCh: make(chan chatMessage, 100),
 	}
-	clients[c.clientId] = &c
-	mu.Unlock()
-	defer c.conn.Close()
-
-	// send connected clients message immediately on connect so client
-	// dont have to wait
-	tempMap := map[uuid.UUID]*client{c.clientId: &c}
-	sendConnectedClientsMessage(clients, tempMap)
-
-	var recipient *client
-
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("client %s disconnecting: %v\n", c, err)
-			mu.Lock()
-			delete(clients, c.clientId)
-			mu.Unlock()
-			break
-		}
-		// decoded, err := message.Decode(msg)
-		// if err != nil {
-		// 	log.Printf("skipping message - could not decode: %v\n", err)
-		// }
-
-		dest := &message.Message{}
-		if err := proto.Unmarshal(msg, dest); err != nil {
-			panic(err)
-		}
-
-		switch m := dest.Body.(type) {
-		case *message.Message_ClientInfoMessage:
-			log.Printf("got client info message from client %s: %s\n", c.clientId, m.ClientInfoMessage.Name)
-			c.name = m.ClientInfoMessage.Name
-		case *message.Message_ChatMessage:
-			recipientId, err := uuid.FromBytes([]byte(m.ChatMessage.RecipientId))
-			senderId, err := uuid.FromBytes([]byte(m.ChatMessage.SenderId))
-
-			mu.Lock()
-			recipient, err = getClientById(recipientId, clients)
-			sender, err := getClientById(senderId, clients)
-			mu.Unlock()
-			if err != nil {
-				log.Printf("client %s already disconnected: %v", recipientId, err)
-				break
-			}
-			log.Printf("got chat message %+v from %s to %s\n", m, senderId, recipientId)
-
-			prepared, err := websocket.NewPreparedMessage(1, msg)
-			if err != nil {
-				log.Fatalf("could not prepare message: %v", err)
-			}
-
-			err = recipient.conn.WritePreparedMessage(prepared)
-			if err != nil {
-				log.Printf("error writing message to client %d: %v\n", recipient.clientId, err)
-				continue
-			}
-			err = sender.conn.WritePreparedMessage(prepared)
-			if err != nil {
-				log.Printf("error writing message to client %d: %v\n", sender.clientId, err)
-				continue
-			}
-		default:
-			log.Printf("got some weird message from client: %v", m)
-		}
-
-	}
+	s.clients[c.clientId] = &c
+	log.Printf("client %s connected\n", c)
+	return &pb.ConnectResponse{ClientId: id.String()}, nil
 }
 
-func sendConnectedClientsMessage(clients map[uuid.UUID]*client, sendTo map[uuid.UUID]*client) {
-	mu.Lock()
-	defer mu.Unlock()
-	connectedClients := &message.ConnectedClientsMessage{}
+func (s *server) GetConnectedClients(ctx context.Context, in *pb.ConnectedClientsRequest) (*pb.ConnectedClientsResponse, error) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
 
-	ccs := []*message.ConnectedClientsMessage_ConnectedClient{}
-	for id, c := range clients {
-		if c.name == "" {
-			continue
-		}
-		ccs = append(ccs, &message.ConnectedClientsMessage_ConnectedClient{Name: c.name, Id: id.String()})
+	clients := []*pb.ConnectedClientsResponse_ConnectedClient{}
+	for _, client := range s.clients {
+		clients = append(clients, &pb.ConnectedClientsResponse_ConnectedClient{Name: client.name, Id: client.clientId.String()})
 	}
-	m := message.ConnectedClientsMessage{Clients: connectedClients}
-	encoded, err := m.Encode()
+
+	resp := pb.ConnectedClientsResponse{Clients: clients}
+
+	return &resp, nil
+}
+
+func (s *server) Message(ctx context.Context, in *pb.ChatMessage) (*pb.MessageResponse, error) {
+	s.clientsMu.Lock()
+	defer s.clientsMu.Unlock()
+
+	recipient, err := getClientById(uuid.MustParse(in.RecipientId), s.clients)
 	if err != nil {
-		log.Fatalf("could not encode connected clients: %v ", err)
+		return nil, err
 	}
-
-	prepared, err := websocket.NewPreparedMessage(1, encoded)
+	sender, err := getClientById(uuid.MustParse(in.SenderId), s.clients)
 	if err != nil {
-		log.Fatalf("error preparing message: %v\n", err)
+		return nil, err
 	}
 
-	for _, cl := range sendTo {
-		err := cl.conn.WritePreparedMessage(prepared)
+	recipient.messageCh <- chatMessage{recipient: recipient.clientId.String(), text: in.GetText(), sender: sender.clientId.String()}
+	return &pb.MessageResponse{}, nil
+}
+
+func (s *server) ReceiveMessages(in *pb.ReceiveRequest, stream pb.ChatServer_ReceiveMessagesServer) error {
+	s.clientsMu.Lock()
+	receiver, err := getClientById(uuid.MustParse(in.ClientId), s.clients)
+	s.clientsMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	for m := range receiver.messageCh {
+		err := stream.Send(&pb.ChatMessage{Text: m.text, SenderId: m.sender, RecipientId: m.recipient})
 		if err != nil {
-			log.Printf("error writing message to client %s: %v\n", cl, err)
-			continue
+			return err
 		}
 	}
+
+	return nil
 }
 
 func main() {
-	clients = make(map[uuid.UUID]*client)
+	listener, err := net.Listen("tcp", ListenAddr)
+	if err != nil {
+		log.Fatalf("can not listen: %v", err)
+	}
 
-	// send out information about the clients to every client
-	go func() {
-		t := time.NewTicker(ClientsInfoPeriod)
-		defer t.Stop()
-		for range t.C {
-			sendConnectedClientsMessage(clients, clients)
-		}
-	}()
+	grpcServer := grpc.NewServer()
+	s := server{clients: make(map[uuid.UUID]*client)}
+	pb.RegisterChatServerServer(grpcServer, &s)
 
-	http.HandleFunc("/", dummy)
-	log.Println("started server")
-	log.Fatal(http.ListenAndServe(ListenAddr, nil))
+	log.Printf("started server at %s\n", ListenAddr)
+	if err := grpcServer.Serve(listener); err != nil {
+		log.Fatalf("cant serve grpc: %v", err)
+	}
+
 }

@@ -3,21 +3,9 @@ package msg;
 
 option go_package = "pkg/message";
 
-message Message {
-    oneof body {
-        ChatMessage chat_message = 1;
-        ConnectedClientsMessage connected_clients_message = 2;
-        ClientInfoMessage client_info_message = 3;
-    }
-}
+message ConnectedClientsRequest {}   
 
-message ChatMessage {
-    string text = 1;
-    string sender_id = 2;
-    string recipient_id = 3;
-}
-
-message ConnectedClientsMessage {
+message ConnectedClientsResponse {
     message ConnectedClient {
       string name = 1;
       string id = 2;
@@ -26,9 +14,32 @@ message ConnectedClientsMessage {
     repeated ConnectedClient clients = 1;
 }
 
-message ClientInfoMessage {
+
+message ChatMessage {
+    string text = 1;
+    string sender_id = 2;
+    string recipient_id = 3;
+}
+
+message ReceiveRequest {
+    string client_id = 1;
+}
+
+message MessageResponse {}
+
+message ConnectRequest {
     string name = 1;
 }
 
+message ConnectResponse {
+    string client_id = 1;
+}
 
+service ChatServer {
+    rpc GetConnectedClients(ConnectedClientsRequest) returns (ConnectedClientsResponse);
+    rpc Connect(ConnectRequest) returns (ConnectResponse);
+    rpc Message(ChatMessage) returns (MessageResponse);
+    rpc ReceiveMessages(ReceiveRequest) returns (stream ChatMessage);
+    // TODO: pull old messages
+}
 
